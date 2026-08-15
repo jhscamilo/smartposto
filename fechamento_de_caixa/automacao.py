@@ -2,394 +2,335 @@ import os
 import time
 import subprocess
 from tkinter import Tk, filedialog
-import pandas as pd
+import openpyxl
 from pywinauto import Application
+import pyautogui
+from PIL import Image
+import pytesseract
+import pandas as pd
+import cv2
+import numpy as np
+
+def localizar_e_clicar_imagem(nome_imagem, cliques=1, arrasto_x=0, arrasto_y=0):
+    diretorio_projeto = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    caminho_real_imagem = os.path.join(diretorio_projeto, nome_imagem)
+    
+    print_tela = pyautogui.screenshot()
+    imagem_tela = cv2.cvtColor(np.array(print_tela), cv2.COLOR_RGB2BGR)
+    imagem_alvo = cv2.imread(caminho_real_imagem)
+    
+    if imagem_alvo is None:
+        return None
+        
+    resultado = cv2.matchTemplate(imagem_tela, imagem_alvo, cv2.TM_CCOEFF_NORMED)
+    _, max_val, _, max_loc = cv2.minMaxLoc(resultado)
+    
+    if max_val >= 0.8:
+        h, w = imagem_alvo.shape[:2]
+        centro_x = max_loc[0] + (w // 2) + arrasto_x
+        centro_y = max_loc[1] + (h // 2) + arrasto_y
+        
+        pyautogui.moveTo(centro_x, centro_y, duration=0.4)
+        pyautogui.click(clicks=cliques, interval=0.2)
+        return (centro_x, centro_y)
+    return None
 
 def extrair_dados_do_nome(nome_arquivo):
     """Extrai cartão, posto e data baseando-se no padrão do nome do arquivo."""
     nome_sem_extensao, _ = os.path.splitext(nome_arquivo)
     partes = nome_sem_extensao.split(" ")
-    
     cartao = "Goodcard" if "Goodcard" in nome_sem_extensao else "Não identificado"
-    
     posto = "Não identificado"
     if "Centro Automotivo" in nome_sem_extensao:
         posto = "Centro Automotivo"
     elif "Arquipelago" in nome_sem_extensao:
-        posto = "Posto Arquipelago"
+        posto = "Posto Archipelago"
     elif "Mareli" in nome_sem_extensao:
         posto = "Posto Mareli"
-        
     data_lancamento = partes[-1] if partes else "Não identificada"
     return cartao, posto, data_lancamento
 
-def abrir_via_libreoffice(caminho_arquivo, caminho_novo):
-    """Caso o pandas falhe, usa o LibreOffice Calc via terminal para salvar como .xlsx limpo."""
-    print("Tentando converter o arquivo usando o LibreOffice Calc...")
-    
-    # Caminhos mais comuns onde o LibreOffice fica instalado no Windows
-    caminhos_libreoffice = [
-        r"C:\Program Files\LibreOffice\program\scalc.exe",
-        r"C:\Program Files (x86)\LibreOffice\program\scalc.exe"
-    ]
-    
-    scalc_path = None
-    for caminho in caminhos_libreoffice:
-        if os.path.exists(caminho):
-            scalc_path = caminho
-            break
-            
-    if not scalc_path:
-        print("❌ O LibreOffice Calc não foi encontrado nas pastas padrão do Windows.")
-        return False
-        
-    try:
-        pasta_destino = os.path.dirname(caminho_arquivo)
-        # Comando do LibreOffice para converter arquivos em background de forma invisível
-        comando = f'"{scalc_path}" --headless --convert-to xlsx "{caminho_arquivo}" --outdir "{pasta_destino}"'
-        
-        # Executa a conversão do sistema
-        subprocess.run(comando, shell=True, check=True)
-        
-        # O LibreOffice cria um arquivo com o mesmo nome, só mudando para .xlsx
-        nome_base, _ = os.path.splitext(caminho_arquivo)
-        arquivo_convertido = nome_base + ".xlsx"
-        
-        if os.path.exists(arquivo_convertido):
-            # Agora abre o arquivo novo e coloca a coluna Conferido
-            df = pd.read_excel(arquivo_convertido)
-            df.columns = [str(col).strip() for col in df.columns]
-            df['Conferido'] = ""
-            
-            # Reorganiza para colocar 'Conferido' na primeira coluna
-            outras = [c for c in df.columns if c != 'Conferido']
-            df = df[['Conferido'] + outras]
-            
-            # Salva por cima com o nome correto terminado em _conferido.xlsx
-            df.to_excel(caminho_novo, index=False)
-            
-            # Apaga o arquivo temporário convertido sem o sufixo
-            os.remove(arquivo_convertido)
-            return True
-            
-    except Exception as e:
-        print(f"❌ Falha ao processar pelo LibreOffice: {e}")
-    return False
-
-import openpyxl
-
-import openpyxl
-
 def processar_planilha_seguro(caminho_arquivo):
-    print("Modificando o arquivo original e inserindo uma nova coluna...")
-    
-    # 1. Converte .xls para .xlsx usando o LibreOffice se necessário
+    print("[PLANILHA] Verificando e estruturando colunas da planilha selecionada...")
     if caminho_arquivo.endswith('.xls'):
-        print("⚠️ Convertendo formato antigo .xls para aceitar modificações nativas...")
         pasta_destino = os.path.dirname(caminho_arquivo)
         nome_base, _ = os.path.splitext(caminho_arquivo)
         caminho_trabalho = nome_base + ".xlsx"
-        
         caminhos_libreoffice = [
             r"C:\Program Files\LibreOffice\program\scalc.exe",
             r"C:\Program Files (x86)\LibreOffice\program\scalc.exe"
         ]
         scalc_path = next((c for c in caminhos_libreoffice if os.path.exists(c)), None)
-        
         if scalc_path:
             comando = f'"{scalc_path}" --headless --convert-to xlsx "{caminho_arquivo}" --outdir "{pasta_destino}"'
             subprocess.run(comando, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             try: os.remove(caminho_arquivo) 
             except: pass
         else:
-            print("❌ LibreOffice não encontrado para converter o arquivo.")
             return False
     else:
         caminho_trabalho = caminho_arquivo
-
     try:
-        # 2. Abre a planilha original preservando o layout
         wb = openpyxl.load_workbook(caminho_trabalho)
         ws = wb.active
-        
-        # 3. Procura a linha onde está a palavra "CNPJ" para saber onde alinhar
         linha_cnpj = None
         for row in range(1, 20):
-            # Procura na coluna A ou B original antes de mexer na estrutura
             val_a = str(ws.cell(row=row, column=1).value).strip()
             val_b = str(ws.cell(row=row, column=2).value).strip()
             if val_a == "CNPJ" or val_b == "CNPJ":
                 linha_cnpj = row
                 break
-                
         if not linha_cnpj:
-            linha_cnpj = 6 # Caso não encontre por algum motivo, assume a linha 6 do padrão
-            
-        # 4. CRIA A NOVA COLUNA À ESQUERDA (Coluna A vira uma nova coluna limpa)
-        # O comando insert_cols(1) cria uma coluna vazia na posição 1 (Coluna A) e empurra o resto para a direita
+            linha_cnpj = 6
         ws.insert_cols(1)
-        
-        # 5. Escreve "Conferido" na nova Coluna A, exatamente na linha do CNPJ
         ws.cell(row=linha_cnpj, column=1).value = "Conferido"
-        print(f"✨ Nova coluna criada! 'Conferido' adicionado na célula A{linha_cnpj}.")
-            
-        # 6. Salva e altera o nome do arquivo incluindo o '_conferido'
         pasta = os.path.dirname(caminho_trabalho)
         nome_completo = os.path.basename(caminho_trabalho)
         nome_sem_ext, _ = os.path.splitext(nome_completo)
-        
         if nome_sem_ext.endswith("_conferido"):
             nome_sem_ext = nome_sem_ext.replace("_conferido", "")
-            
         caminho_final = os.path.join(pasta, f"{nome_sem_ext}_conferido.xlsx")
-        
         wb.save(caminho_trabalho)
         wb.close()
-        
-        # Altera o nome do arquivo fisicamente no Windows
         if os.path.exists(caminho_trabalho):
             if os.path.exists(caminho_final):
-                os.remove(caminho_final) # Remove se já existir um teste antigo com o mesmo nome
+                os.remove(caminho_final)
             os.rename(caminho_trabalho, caminho_final)
-            
-        print(f"✅ Arquivo modificado com sucesso: {os.path.basename(caminho_final)}")
+        print(f"[SUCESSO] Planilha editada e salva como: {os.path.basename(caminho_final)}")
         return True
-        
     except Exception as e:
-        print(f"❌ Erro ao processar arquivo: {e}")
+        print(f"[ERRO] Falha crítica ao manipular as células da planilha: {e}")
         return False
 
 def selecionar_e_processar_projeto():
-    print("Aguardando seleção do arquivo...")
-    
+    print("Aguardando seleção do arquivo pelo usuário...")
     root = Tk()
     root.withdraw()
     root.attributes('-topmost', True)
-    
     caminho_arquivo = filedialog.askopenfilename(
         title="Selecione o arquivo de Fechamento de Caixa",
         filetypes=[("Arquivos de Fechamento", "*.xls *.xlsx")]
     )
-    
     if not caminho_arquivo:
-        print("Nenhum arquivo foi selecionado. Processo cancelado.")
         return None
-    
     caminho_arquivo = os.path.abspath(caminho_arquivo)
     nome_arquivo = os.path.basename(caminho_arquivo)
-    print(f"Arquivo selecionado: {nome_arquivo}")
-    
     cartao, posto, data_lancamento = extrair_dados_do_nome(nome_arquivo)
-    
     print(f"\n[DADOS CAPTURADOS DO NOME]")
     print(f"💳 Cartão: {cartao}")
     print(f"⛽ Posto: {posto}")
     print(f"📅 Data: {data_lancamento}\n")
-    
     processar_planilha_seguro(caminho_arquivo)
     return {"cartao": cartao, "posto": posto, "data": data_lancamento}
 
 def abrir_e_logar_webposto():
-    # 1. Executa a seleção e modificação da planilha
     dados_caixa = selecionar_e_processar_projeto()
     if not dados_caixa:
         return
-        
-    print("\nIniciando a automação do webPosto...")
+    print("\n[SISTEMA] Iniciando a automação do sistema webPosto...")
     caminho_programa = r"C:\Quality\web\QualityPosto.exe"
-    
     try:
-        # 2. Abre o programa e faz o login
+        print(f"[SISTEMA] Executando o arquivo do programa em: {caminho_programa}")
         app = Application(backend="win32").start(caminho_programa)
-        print("Programa aberto. Aguardando a tela de login carregar...")
+        print("[SISTEMA] Aguardando 5 segundos para o carregamento da tela de login...")
         time.sleep(5)
         
+        print("[SISTEMA] Capturando a janela de credenciais e forçando o primeiro plano...")
         janela_login = app.top_window()
-        print("Forçando a janela a aparecer no primeiro plano...")
         janela_login.set_focus()
-        
-        print("Digitando o usuário...")
         janela_login.click_input()
+        
+        print("[ROBÔ] Digitando o usuário: GESSICAMARELI")
         janela_login.type_keys("^a{BACKSPACE}GESSICAMARELI", set_foreground=True)
         janela_login.type_keys("{TAB}")
         
-        print("Digitando a senha...")
+        print("[ROBÔ] Digitando a senha cadastrada...")
         janela_login.type_keys("12345")
         
-        print("Pressionando Enter para entrar...")
+        print("[ROBÔ] Enviando comando ENTER para validar o acesso...")
         janela_login.type_keys("{ENTER}")
+        print("[SUCESSO] Automação de login concluída!")
         
-        print("Automação de login concluída!")
+        print("[SISTEMA] Conectando ao motor óptico Tesseract do projeto...")
+        diretorio_projeto = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        pytesseract.pytesseract.tesseract_cmd = os.path.join(diretorio_projeto, "Tesseract-OCR", "tesseract.exe")
         
-        # 3. Aguardar a tela de seleção de posto carregar
-        print("Aguardando a tela de seleção de postos carregar...")
+        print("[SISTEMA] Aguardando 4 segundos para a abertura da listagem de filiais...")
         time.sleep(4)
-        
         janela_principal = app.top_window()
         janela_principal.set_focus()
         
-        # 4. LÓGICA DE SELEÇÃO DO POSTO
         posto_detectado = dados_caixa['posto']
-        print(f"Identificado no arquivo: '{posto_detectado}'.")
-        
-        # Mapeia quantas vezes o robô precisa apertar a 'seta para baixo' para chegar no posto certo
-        # Olhando a imagem: Centro = 0 (já começa nele), Mareli = 1, Arquipelago = 2
         pulos_seta = 0
-        if posto_detectado == "Centro Automotivo":
-            pulos_seta = 0
-        elif posto_detectado == "Posto Mareli":
-            pulos_seta = 1
-        elif posto_detectado == "Posto Arquipelago":
-            pulos_seta = 2
+        if posto_detectado == "Centro Automotivo": pulos_seta = 0
+        elif posto_detectado == "Posto Mareli": pulos_seta = 1
+        elif posto_detectado == "Posto Archipelago": pulos_seta = 2
             
-        print(f"Navegando na lista de filiais...")
-        import pyautogui
-        
-        # Dá um clique físico no meio da lista para garantir que o teclado está ativo ali dentro
+        print(f"[ROBÔ] Ativando foco no grid de postos da tela vermelha...")
         pyautogui.click(x=janela_principal.rectangle().left + 200, y=janela_principal.rectangle().top + 180)
         time.sleep(0.5)
         
-        # Desce na lista o número de vezes necessário
+        print(f"[ROBÔ] Pressionando a SETA PARA BAIXO {pulos_seta} vezes para selecionar o posto correto...")
         for _ in range(pulos_seta):
             pyautogui.press('down')
             time.sleep(0.3)
-
-        # 5. CLIQUE NO BOTÃO VERMELHO "SELECIONAR"
-        print("Confirmando a seleção no botão vermelho 'Selecionar'...")
+            
+        print("[ROBÔ] Pressionando ENTER para acionar o botão vermelho 'Selecionar'...")
         pyautogui.press('enter')
-        print("✅ Comando de entrada enviado com sucesso!")
+        print("[SUCESSO] Posto confirmado na interface do sistema!")
         
-        # 6. TRATAMENTO DO POP-UP "NOVIDADES WEBPOSTO"
-        print("Aguardando carregamento da tela principal...")
-        time.sleep(5)
+        print("[SISTEMA] Aguardando 8 segundos para a carga completa da tela inicial...")
+        time.sleep(8)
         
         janela_principal = app.top_window()
         janela_principal.set_focus()
         
-        # Sequência de fechamento dos pop-ups (Check verde + ESC)
+        print("[POP-UP] Tratando possíveis pop-ups iniciais...")
         try:
             rect = janela_principal.rectangle()
-            posicao_x_check = rect.left + 25
-            posicao_y_check = rect.bottom - 20
-            
-            for i in range(3):
-                pyautogui.click(x=posicao_x_check, y=posicao_y_check)
+            for _ in range(3):
+                pyautogui.click(x=rect.left + 25, y=rect.bottom - 20)
                 time.sleep(0.8)
-        except:
-            pass
-            
+        except: pass
         pyautogui.press('esc')
-        time.sleep(1) # Aguarda 1 segundo para garantir que a tela de trás reaja
-        
-        # 7. CLICAR EM FINANCEIRO E FECHAMENTO DE CAIXA
-        print("Abrindo o menu Financeiro via clique posicional...")
-        
-        janela_principal = app.top_window()
-        janela_principal.set_focus()
-        time.sleep(0.5)
-        
-        rect_main = janela_principal.rectangle()
-        
-        # 1º Clique: Abre a aba Financeiro
-        posicao_x_financeiro = rect_main.left + 265
-        posicao_y_financeiro = rect_main.top + 45
-        pyautogui.click(x=posicao_x_financeiro, y=posicao_y_financeiro)
         time.sleep(1.5)
         
-        print("Clicando no botão 'Fechamento de Caixa'...")
-        # 2º Clique: Abre a janela interna do Fechamento
-        posicao_x_fechamento = rect_main.left + 690
-        posicao_y_fechamento = rect_main.top + 105
-        pyautogui.click(x=posicao_x_fechamento, y=posicao_y_fechamento)
-        
-        # 8. PREENCHER AS DATAS E CONSULTAR (MÉTODO VISÃO ÓPTICA - INDEPENDENTE DE MONITOR)
-        print("Aguardando a janela do Fechamento de Caixa carregar...")
-        time.sleep(4) 
-        
-        data_para_preencher = dados_caixa['data'].replace("-", "").replace("/", "")
-        print(f"Preparando digitação da data: {data_para_preencher}")
-        
-        import pyautogui
-        from PIL import Image
-        import pytesseract
-        
-        # Descobre onde o script do projeto está rodando no computador atual
-        diretorio_projeto = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-        # Aponta para a pasta do Tesseract que está dentro do próprio projeto
-        pytesseract.pytesseract.tesseract_cmd = os.path.join(diretorio_projeto, "Tesseract-OCR", "tesseract.exe")
-
-        
-        print("Buscando as palavras 'Data' na tela visualmente...")
-        try:
-            # 1. Tira uma foto instantânea da tela inteira
-            foto_tela = pyautogui.screenshot()
+        # --- BUSCA POR IMAGEM REFINADA COM O SEU NOVO PRINT CINZA ---
+        print("[VISÃO] Procurando a aba 'Financeiro' (fundo cinza normal) no menu superior...")
+        if localizar_e_clicar_imagem('aba_financeiro_menu.png', cliques=1):
+            print("[SUCESSO] Aba Financeiro clicada com precisão de imagem!")
+            time.sleep(2) # Aguarda a barra expandir para o lado de baixo
+        else:
+            print("[ERRO] Não encontrou a imagem 'aba_financeiro_menu.png'. Certifique-se de salvá-la na pasta smartposto.")
+            return
             
-            # 2. O Python lê a foto e descobre as coordenadas de todas as palavras da tela
-            dados_leitura = pytesseract.image_to_data(foto_tela, output_type=pytesseract.Output.DICT)
-            
-            pontos_data = []
-            
-            # Varre todas as palavras encontradas na tela para achar onde está escrito "Data"
-            for i, texto in enumerate(dados_leitura['text']):
-                if "Data" in texto:
-                    # Captura a posição física X e Y da palavra na sua tela
-                    x = dados_leitura['left'][i] + (dados_leitura['width'][i] // 2)
-                    y = dados_leitura['top'][i] + (dados_leitura['height'][i] // 2)
-                    pontos_data.append((x, y))
-            
-            # Baseado no layout da sua imagem, as duas primeiras vezes que a palavra "Data" 
-            # aparece no bloco cinza superior correspondem a 'Data Inicio' e 'Data Fim'
-            if len(pontos_data) >= 2:
-                print(f"✅ Textos de data localizados visualmente na tela!")
-                
-                # --- Preenchendo Data Inicio ---
-                x_inicio, y_inicio = pontos_data[0]
-                # SUA IDÉIA: Anda 90 pixels para a direita a partir do texto lido
-                pyautogui.moveTo(x_inicio + 90, y_inicio, duration=0.4)
-                pyautogui.click(clicks=2, interval=0.2) # Duplo clique que você descobriu
-                time.sleep(0.3)
-                pyautogui.hotkey('ctrl', 'a')
-                pyautogui.press('backspace')
-                pyautogui.write(data_para_preencher, interval=0.05)
-                pyautogui.press('esc')
-                time.sleep(0.5)
-                
-                # --- Preenchendo Data Fim ---
-                x_fim, y_fim = pontos_data[1]
-                pyautogui.moveTo(x_fim + 90, y_fim, duration=0.4)
-                pyautogui.click(clicks=2, interval=0.2)
-                time.sleep(0.3)
-                pyautogui.hotkey('ctrl', 'a')
-                pyautogui.press('backspace')
-                pyautogui.write(data_para_preencher, interval=0.05)
-                pyautogui.press('esc')
-                time.sleep(0.5)
-                
+        print("[VISÃO] Procurando o botão 'Fechamento de Caixa' na barra de ferramentas...")
+        if localizar_e_clicar_imagem('fechamento_de_caixa.png', cliques=1):
+            print("[SUCESSO] Janela de Fechamento de Caixa disparada!")
+        else:
+            print("[SISTEMA] Usando redundância de texto para o Fechamento de Caixa...")
+            foto_ribbon = pyautogui.screenshot()
+            dados_ribbon = pytesseract.image_to_data(foto_ribbon, output_type=pytesseract.Output.DICT)
+            x_fc, y_fc = None, None
+            for i, texto in enumerate(dados_ribbon['text']):
+                texto_limpo = texto.strip().lower()
+                if "fechamento" in texto_limpo or "caixa" in texto_limpo:
+                    y_atual = dados_ribbon['top'][i] + (dados_ribbon['height'][i] // 2)
+                    if y_atual < 200: 
+                        x_fc = dados_ribbon['left'][i] + (dados_ribbon['width'][i] // 2)
+                        y_fc = y_atual
+                        break
+            if x_fc and y_fc:
+                pyautogui.moveTo(x_fc, y_fc, duration=0.5)
+                pyautogui.click()
             else:
-                print("❌ Não foi possível ler a palavra 'Data' na tela. Verifique se a janela está aberta.")
-                
-            # --- 3. LOCALIZAR O BOTÃO CONSULTAR PELO TEXTO ---
-            print("Buscando o botão 'Consultar' visualmente...")
-            for i, texto in enumerate(dados_leitura['text']):
-                if "Consultar" in texto or "onsultar" in texto:
-                    x_btn = dados_leitura['left'][i] + (dados_leitura['width'][i] // 2)
-                    y_btn = dados_leitura['top'][i] + (dados_leitura['height'][i] // 2)
-                    
-                    pyautogui.moveTo(x_btn, y_btn, duration=0.4)
-                    pyautogui.click()
-                    print("✅ Botão Consultar acionado com sucesso visualmente!")
-                    break
-                    
-        except Exception as e_visao:
-            print(f"⚠️ Falha no motor de leitura óptica da tela: {e_visao}")
-            print("Verifique se o Tesseract foi instalado corretamente no Passo 2.")
+                print("[ERRO] Não foi possível localizar o botão do Fechamento de Caixa.")
+                return
+
+        print("[SISTEMA] Aguardando 4 segundos para o carregamento da janela interna...")
+        time.sleep(4) 
+        data_para_preencher = dados_caixa['data'].replace("-", "").replace("/", "")
+        print(f"[SISTEMA] String de data formatada para envio: {data_para_preencher}")
+        
+        # --- PASSO 1: PREENCHER AS DATAS DE FORMA SEGURA ---
+        ponto_inicio = localizar_e_clicar_imagem('campo_data.png', cliques=2)
+        if ponto_inicio:
+            x_ini, y_ini = ponto_inicio
+            pyautogui.hotkey('ctrl', 'a')
+            pyautogui.press('backspace')
+            pyautogui.write(data_para_preencher, interval=0.05)
+            pyautogui.press('esc')
+            time.sleep(0.5)
             
+            pyautogui.moveTo(x_ini, y_ini + 35, duration=0.4)
+            pyautogui.click(clicks=2, interval=0.2)
+            time.sleep(0.3)
+            pyautogui.hotkey('ctrl', 'a')
+            pyautogui.press('backspace')
+            pyautogui.write(data_para_preencher, interval=0.05)
+            pyautogui.press('esc')
+            time.sleep(0.5)
+        else:
+            print("[ERRO] Não localizou o campo de data.")
+            return
+
+        # --- PASSO 2: CLICAR EM CONSULTAR ---
+        # Salva as coordenadas do botão Consultar para usar de barreira vertical na tabela
+        ponto_consultar = localizar_e_clicar_imagem('botao_consultar.png')
+        if not ponto_consultar:
+            print("[ERRO] Botão Consultar não localizado.")
+            return
+        y_btn = ponto_consultar[1]
+        time.sleep(4)
+
+        # --- PASSO 3: CLIQUE DUPLO NO 1º TURNO ---
+        if not localizar_e_clicar_imagem('texto_1turno.png', cliques=2):
+            print("[ERRO] Linha do 1º Turno não localizada.")
+            return
+
+        # --- PASSO 4: SELECIONAR A ABA CARTÃO ---
+        time.sleep(5)
+        if not localizar_e_clicar_imagem('aba_cartao.png'):
+            print("[ERRO] Aba Cartão não localizada.")
+            return
+        time.sleep(2)
+
+        # --- LOOP DE BUSCA EXCLUSIVA DA PRIMEIRA OCORRÊNCIA ---
+        def executar_filtro_goodcard(tentativa=1):
+            print(f"\n[FILTRO] Analisando a lista de administradoras (Página {tentativa})...")
+            
+            diretorio_projeto = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            caminho_admin = os.path.join(diretorio_projeto, 'texto_administradora.png')
+            print_tela = pyautogui.screenshot()
+            img_tela = cv2.cvtColor(np.array(print_tela), cv2.COLOR_RGB2BGR)
+            img_alvo = cv2.imread(caminho_admin)
+            
+            if img_alvo is not None:
+                res = cv2.matchTemplate(img_tela, img_alvo, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, max_loc = cv2.minMaxLoc(res)
+                if max_val >= 0.8:
+                    h, w = img_alvo.shape[:2]
+                    pyautogui.moveTo(max_loc[0] + w + 15, max_loc[1] + (h // 2), duration=0.4)
+                    time.sleep(0.6)
+            
+            if localizar_e_clicar_imagem('filtro_administradora.png', cliques=1):
+                time.sleep(1.5)
+                
+                caminho_goodcard = os.path.join(diretorio_projeto, 'opcao_goodcard.png')
+                print_lista = pyautogui.screenshot()
+                img_lista = cv2.cvtColor(np.array(print_lista), cv2.COLOR_RGB2BGR)
+                img_good = cv2.imread(caminho_goodcard)
+                
+                encontrou_goodcard = False
+                if img_good is not None:
+                    res_good = cv2.matchTemplate(img_lista, img_good, cv2.TM_CCOEFF_NORMED)
+                    _, max_val_good, _, max_loc_good = cv2.minMaxLoc(res_good)
+                    if max_val_good >= 0.8:
+                        h_g, w_g = img_good.shape[:2]
+                        pyautogui.moveTo(max_loc_good[0] + (w_g // 2), max_loc_good[1] + (h_g // 2), duration=0.4)
+                        pyautogui.click()
+                        print(f"[🎯 SUCESSO] GOODCARD encontrado e marcado na Página {tentativa}! O robô parou de avançar.")
+                        encontrou_goodcard = True
+                
+                if not encontrou_goodcard:
+                    print(f"[AVISO] GOODCARD não está na Página {tentativa}. Avançando...")
+                    pyautogui.press('esc')
+                    time.sleep(1)
+                    
+                    if localizar_e_clicar_imagem('botao_avancar_caixa.png', cliques=1):
+                        print("[SISTEMA] Próxima página carregada. Reiniciando checagem...")
+                        time.sleep(4)
+                        executar_filtro_goodcard(tentativa = tentativa + 1)
+                    else:
+                        print("[ERRO] Botão Avançar não localizado.")
+            else:
+                print("[ERRO] Não foi possível abrir o funil nesta página.")
+
+        # Dispara a busca controlada
+        executar_filtro_goodcard()
+                
     except Exception as e:
-        print(f"❌ Ocorreu um erro na integração com a tela do webPosto: {e}")
+        print(f"[ERRO] Falha geral de execução: {e}")
 
 if __name__ == "__main__":
     abrir_e_logar_webposto()
-
-
-
